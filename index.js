@@ -62,7 +62,7 @@ module.exports = {
         { name: "table_name", type: "String", required: false },
       ],
     },
-    export_to_qvd_file: {
+    /*export_to_qvd_file: {
       async run(table_name, where, file_name) {},
       description: "Convert a list of JSON objects to a CSV string",
       isAsync: true,
@@ -71,6 +71,6 @@ module.exports = {
         { name: "where", type: "JSON" },
         { name: "file_name", type: "String" },
       ],
-    },
+    },*/
   },
 };
