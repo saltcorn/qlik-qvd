@@ -1,6 +1,6 @@
 {
   "name": "@saltcorn/qlik-qvd",
-  "version": "0.5.2",
+  "version": "0.1.0",
   "description": "Interacting with Qlik QVD files",
   "main": "index.js",
   "dependencies": {
