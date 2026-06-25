@@ -47,7 +47,6 @@ module.exports = {
         } else {
           field_names = fields.map((f) => Field.labelToName(f.FieldName));
         }
-        const [row0, ...rows] = df.data;
         for (const row of df.data) {
           const o = {};
           for (let index = 0; index < field_names.length; index++) {
