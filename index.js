@@ -15,6 +15,10 @@ const numberFormatToType = (nf) => {
       type: "Date",
       attributes: nf.Fmt === "DD.MM.YYYY" ? { day_only: true } : {},
     };
+  if (nf.Type === "TIMESTAMP")
+    return {
+      type: "Date",
+    };
   throw new Error("Unknown NumberFormat: " + JSON.stringify(nf));
 };
 
@@ -47,7 +51,7 @@ module.exports = {
             const f = await Field.create(fld);
             field_names.push(f.name);
           }
-          await getState.refresh_tables();
+          await getState().refresh_tables();
         } else {
           field_names = fields.map((f) => Field.labelToName(f.FieldName));
         }
