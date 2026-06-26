@@ -22,6 +22,15 @@ const numberFormatToType = (nf) => {
   throw new Error("Unknown NumberFormat: " + JSON.stringify(nf));
 };
 
+const QLIK_EPOCH_MS = Date.UTC(1899, 11, 30); // 1899-12-30 00:00:00 (month is 0-indexed)
+const MS_PER_DAY = 86400000;
+
+function fromQlik(serial, { roundToSeconds = true } = {}) {
+  let ms = QLIK_EPOCH_MS + serial * MS_PER_DAY;
+  if (roundToSeconds) ms = Math.round(ms / 1000) * 1000;
+  return new Date(ms);
+}
+
 module.exports = {
   sc_plugin_api_version: 1,
   plugin_name: "qlik-qvd",
@@ -55,10 +64,20 @@ module.exports = {
         } else {
           field_names = fields.map((f) => Field.labelToName(f.FieldName));
         }
+        const timeStampFields = new Set(
+          table.fields
+            .filter((f) => f.type?.name === "Date" && !f.attributes?.day_only)
+            .map((f) => f.name),
+        );
+
         for (const row of df.data) {
           const o = {};
           for (let index = 0; index < field_names.length; index++) {
-            o[field_names[index]] = row[index];
+            const fname = field_names[index];
+            const val = row[index];
+            if (timeStampFields.has(fname) && typeof val === "number")
+              o[fname] = fromQlik(val);
+            else o[fname] = val;
           }
           await table.insertRow(o);
         }
