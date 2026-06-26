@@ -6,7 +6,8 @@
   "dependencies": {
     "@saltcorn/markup": "^0.8.0",
     "@saltcorn/data": "^0.8.0",
-    "qvd4js":"1.0.5"
+    "qvd4js": "1.0.5",
+    "qvdrs": "0.7.0"
   },
   "author": "Tom Nielsen",
   "license": "MIT",

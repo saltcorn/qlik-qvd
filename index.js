@@ -1,3 +1,4 @@
+const fs = require("fs");
 const File = require("@saltcorn/data/models/file");
 const Table = require("@saltcorn/data/models/table");
 const Field = require("@saltcorn/data/models/field");
@@ -6,7 +7,13 @@ const db = require("@saltcorn/data/db");
 
 const { Readable } = require("stream");
 
-const { QvdDataFrame, QvdFileReader } = require("qvd4js");
+// qvd4js is used only to read the QVD header and symbol table (small) so we can
+// deduce field types. qvdrs (native Rust bindings) reads the data section into
+// native memory and lets us stream it out a cell at a time, which keeps large
+// files off the V8 heap and avoids the out-of-memory errors that qvd4js hit by
+// materialising the entire data frame in JavaScript.
+const { QvdFileReader } = require("qvd4js");
+const { readQvd } = require("qvdrs");
 
 // Serialise a single value into a CSV cell suitable for a Postgres
 // `COPY ... FROM STDIN CSV HEADER` ingest. An empty cell becomes NULL.
@@ -85,6 +92,51 @@ function fromQlik(serial, { roundToSeconds = true } = {}) {
   return new Date(ms);
 }
 
+// Read just the XML header and the symbol table of a QVD file using qvd4js,
+// without ever loading or parsing the (potentially huge) index/data section.
+// qvd4js' own load() reads the whole file into a buffer and then builds the
+// entire data frame in memory; here we read only the bytes up to the start of
+// the index table, which is enough to recover the field headers and symbols.
+async function loadQvdMetadata(path) {
+  const reader = new QvdFileReader(path);
+  const fd = await fs.promises.open(path, "r");
+  try {
+    // The XML header lives at the start of the file, terminated by "\r\n\0".
+    // Read forward in chunks until the delimiter is found.
+    const HEADER_DELIMITER = "\r\n\0";
+    const CHUNK = 1 << 16;
+    let head = Buffer.alloc(0);
+    let delimIdx = -1;
+    while (delimIdx === -1) {
+      const buf = Buffer.alloc(CHUNK);
+      const { bytesRead } = await fd.read(buf, 0, CHUNK, head.length);
+      if (bytesRead === 0) break;
+      head = Buffer.concat([head, buf.subarray(0, bytesRead)]);
+      delimIdx = head.indexOf(HEADER_DELIMITER);
+    }
+    if (delimIdx === -1)
+      throw new Error("The QVD XML header could not be located.");
+
+    // Parse the header from what we have read so far; this computes the offset
+    // at which the index (data) table begins.
+    reader._buffer = head;
+    await reader._parseHeader();
+
+    // The symbol table sits between the header and the index table. Read exactly
+    // that region (bytes [0, indexTableOffset)) and parse the symbols, then drop
+    // the buffer. The data section is never touched.
+    const need = reader._indexTableOffset;
+    const buffer = Buffer.alloc(need);
+    await fd.read(buffer, 0, need, 0);
+    reader._buffer = buffer;
+    await reader._parseSymbolTable();
+    reader._buffer = null;
+  } finally {
+    await fd.close();
+  }
+  return reader;
+}
+
 module.exports = {
   sc_plugin_api_version: 1,
   plugin_name: "qlik-qvd",
@@ -93,8 +145,8 @@ module.exports = {
       async run(file_name, table_name) {
         const file = await File.findOne({ filename: file_name });
 
-        const reader = new QvdFileReader(file.location);
-        const df = await reader.load();
+        // Field types come from the QVD header + symbol table only (cheap).
+        const reader = await loadQvdMetadata(file.location);
         const qvdTableName = reader._header.QvdTableHeader.TableName;
         let fields =
           reader._header["QvdTableHeader"]["Fields"]["QvdFieldHeader"];
@@ -123,34 +175,58 @@ module.exports = {
         } else {
           field_names = fields.map((f) => Field.labelToName(f.FieldName));
         }
+
+        const typeByName = new Map(
+          table.fields.map((f) => [f.name, f.type?.name]),
+        );
         const timeStampFields = new Set(
           table.fields
             .filter((f) => f.type?.name === "Date" && !f.attributes?.day_only)
             .map((f) => f.name),
         );
 
-        // Convert the raw QVD value for a given target field to the value we
-        // want stored, applying the Qlik-serial -> Date conversion for
-        // timestamp fields (mirrors the row-by-row path below).
+        // qvdrs returns every value as its display string (numbers as numeric
+        // strings, missing values as null). Convert that string to the value we
+        // want stored: numeric serials in timestamp columns become Dates, and
+        // numeric columns are coerced back to numbers; everything else is left
+        // as the string (already-formatted dates, plain text, ...).
         const convertValue = (fname, val) => {
-          if (timeStampFields.has(fname) && typeof val === "number")
-            return fromQlik(val);
+          if (val === null || val === undefined || val === "") return null;
+          if (timeStampFields.has(fname)) {
+            const n = Number(val);
+            return isNaN(n) ? val : fromQlik(n);
+          }
+          const t = typeByName.get(fname);
+          if (t === "Integer" || t === "Float") {
+            const n = Number(val);
+            return isNaN(n) ? val : n;
+          }
           return val;
         };
+
+        // Read the data section into native (Rust) memory. The whole table is
+        // never materialised on the JavaScript heap; we pull it out one cell at
+        // a time below.
+        const qvdTable = await readQvd(file.location);
+        const numRows = qvdTable.numRows;
+        const qvdColumns = qvdTable.columns;
+        // Map each target field to its column position in the QVD data.
+        const colIndex = fields.map((f) => qvdColumns.indexOf(f.FieldName));
 
         // Fast path: bulk-load via Postgres COPY when the driver supports it.
         // db.copyFrom is only defined on the Postgres driver, not SQLite.
         if (db.copyFrom) {
           // Stream a CSV of the QVD data, using the plugin's field names as the
-          // header, instead of issuing one insertRow per row.
+          // header, instead of issuing one insertRow per row. The generator is
+          // pull-based, so only one row exists in memory at any time.
           const csvStream = Readable.from(
             (function* () {
               yield field_names.map(csvCell).join(",") + "\n";
-              for (const row of df.data) {
+              for (let r = 0; r < numRows; r++) {
                 const cells = new Array(field_names.length);
-                for (let index = 0; index < field_names.length; index++) {
-                  const fname = field_names[index];
-                  cells[index] = csvCell(convertValue(fname, row[index]));
+                for (let i = 0; i < field_names.length; i++) {
+                  const raw = qvdTable.get(r, colIndex[i]);
+                  cells[i] = csvCell(convertValue(field_names[i], raw));
                 }
                 yield cells.join(",") + "\n";
               }
@@ -164,17 +240,17 @@ module.exports = {
             await client.release(true);
           }
         } else {
-          for (const row of df.data) {
+          for (let r = 0; r < numRows; r++) {
             const o = {};
-            for (let index = 0; index < field_names.length; index++) {
-              const fname = field_names[index];
-              o[fname] = convertValue(fname, row[index]);
+            for (let i = 0; i < field_names.length; i++) {
+              const raw = qvdTable.get(r, colIndex[i]);
+              o[field_names[i]] = convertValue(field_names[i], raw);
             }
             await table.insertRow(o);
           }
         }
       },
-      description: "Convert a list of JSON objects to a CSV string",
+      description: "Import a Qlik QVD file into a Saltcorn table",
       isAsync: true,
       arguments: [
         { name: "file_name", type: "String", required: true },
