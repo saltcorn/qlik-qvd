@@ -6,10 +6,15 @@ const { getState } = require("@saltcorn/data/db/state");
 const { QvdDataFrame, QvdFileReader } = require("qvd4js");
 
 const numberFormatToType = (nf) => {
-  if (nf.Type === "REAL") return "Float";
-  if (nf.Type === "INTEGER") return "Integer";
-  if (nf.Type === "TIME") return "String";
-  if (nf.Type === "UNKNOWN") return "String";
+  if (nf.Type === "REAL") return { type: "Float" };
+  if (nf.Type === "INTEGER") return { type: "Integer" };
+  if (nf.Type === "TIME") return { type: "String" };
+  if (nf.Type === "UNKNOWN") return { type: "String" };
+  if (nf.Type === "DATE")
+    return {
+      type: "Date",
+      attributes: nf.Fmt === "DD.MM.YYYY" ? { day_only: true } : {},
+    };
   throw new Error("Unknown NumberFormat: " + JSON.stringify(nf));
 };
 
@@ -36,14 +41,13 @@ module.exports = {
             const fld = {
               table,
               label: field.FieldName,
-              type: numberFormatToType(field.NumberFormat),
-              attributes: {},
+              ...numberFormatToType(field.NumberFormat),
             };
 
             const f = await Field.create(fld);
             field_names.push(f.name);
           }
-          await getState.refresh_tables()
+          await getState.refresh_tables();
         } else {
           field_names = fields.map((f) => Field.labelToName(f.FieldName));
         }
