@@ -19,12 +19,42 @@ const csvCell = (v) => {
   return s;
 };
 
-const numberFormatToType = (nf) => {
-  if (nf.Type === "REAL") return { type: "Float" };
-  if (nf.Type === "FIX") return { type: "Float" };
-  if (nf.Type === "INTEGER") return { type: "Integer" };
+// Resolve a single QVD symbol to the value qvd4js would actually place in the
+// data frame: QvdSymbol.toPrimaryValue() prioritises the string representation,
+// and QvdFileReader.load() then coerces numeric-looking strings to numbers.
+const symbolValue = (symbol) => {
+  const value = symbol.toPrimaryValue();
+  if (typeof value === "string" && value !== "" && !isNaN(Number(value)))
+    return Number(value);
+  return value;
+};
+
+// Inspect every distinct symbol of a field to discover what it really holds.
+// The QVD NumberFormat cannot be trusted on its own: a field tagged INTEGER may
+// still contain pure strings (e.g. "KBS108244839"), so the symbol table is the
+// authoritative source for the column type.
+const scanSymbols = (symbols) => {
+  let hasString = false;
+  let hasNumber = false;
+  let hasFloat = false;
+  for (const symbol of symbols || []) {
+    const value = symbolValue(symbol);
+    if (value === null || value === undefined) continue;
+    if (typeof value === "number") {
+      hasNumber = true;
+      if (!Number.isInteger(value)) hasFloat = true;
+    } else {
+      hasString = true;
+    }
+  }
+  return { hasString, hasNumber, hasFloat };
+};
+
+const deduceFieldType = (field, symbols) => {
+  const nf = field.NumberFormat;
+  // Dates/times are identified through the number format only; in the symbol
+  // table they appear as numeric serials or formatted strings.
   if (nf.Type === "TIME") return { type: "String" };
-  if (nf.Type === "UNKNOWN") return { type: "String" };
   if (nf.Type === "DATE")
     return {
       type: "Date",
@@ -34,7 +64,16 @@ const numberFormatToType = (nf) => {
     return {
       type: "Date",
     };
-  throw new Error("Unknown NumberFormat: " + JSON.stringify(nf));
+
+  // For everything else, let the actual symbol contents decide between String,
+  // Float and Integer rather than relying on the (unreliable) NumberFormat.
+  const { hasString, hasNumber, hasFloat } = scanSymbols(symbols);
+  if (hasString) return { type: "String" };
+  if (hasFloat || nf.Type === "REAL" || nf.Type === "FIX")
+    return { type: "Float" };
+  if (hasNumber || nf.Type === "INTEGER") return { type: "Integer" };
+  // No usable symbols (e.g. an all-null column): fall back to String.
+  return { type: "String" };
 };
 
 const QLIK_EPOCH_MS = Date.UTC(1899, 11, 30); // 1899-12-30 00:00:00 (month is 0-indexed)
@@ -57,19 +96,24 @@ module.exports = {
         const reader = new QvdFileReader(file.location);
         const df = await reader.load();
         const qvdTableName = reader._header.QvdTableHeader.TableName;
-        const fields =
+        let fields =
           reader._header["QvdTableHeader"]["Fields"]["QvdFieldHeader"];
+        // A QVD with a single field is parsed as an object, not an array.
+        // Normalise so it lines up with reader._symbolTable, which is always an
+        // array indexed by field position.
+        if (!Array.isArray(fields)) fields = [fields];
 
         let table = Table.findOne({ name: table_name || qvdTableName });
         let field_names = [];
         if (!table) {
           table = await Table.create(table_name || qvdTableName);
 
-          for (const field of fields) {
+          for (let i = 0; i < fields.length; i++) {
+            const field = fields[i];
             const fld = {
               table,
               label: field.FieldName,
-              ...numberFormatToType(field.NumberFormat),
+              ...deduceFieldType(field, reader._symbolTable[i]),
             };
 
             const f = await Field.create(fld);
