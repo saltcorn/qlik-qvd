@@ -21,6 +21,7 @@ const csvCell = (v) => {
 
 const numberFormatToType = (nf) => {
   if (nf.Type === "REAL") return { type: "Float" };
+  if (nf.Type === "FIX") return { type: "Float" };
   if (nf.Type === "INTEGER") return { type: "Integer" };
   if (nf.Type === "TIME") return { type: "String" };
   if (nf.Type === "UNKNOWN") return { type: "String" };
