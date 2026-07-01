@@ -137,6 +137,8 @@ async function loadQvdMetadata(path) {
   return reader;
 }
 
+const unPctFieldName = (s) => s.replaceAll("%", "Pct");
+
 module.exports = {
   sc_plugin_api_version: 1,
   plugin_name: "qlik-qvd",
@@ -164,7 +166,7 @@ module.exports = {
             const field = fields[i];
             const fld = {
               table,
-              label: field.FieldName,
+              label: unPctFieldName(field.FieldName),
               ...deduceFieldType(field, reader._symbolTable[i]),
             };
 
@@ -173,7 +175,7 @@ module.exports = {
           }
           await getState().refresh_tables();
         } else {
-          field_names = fields.map((f) => Field.labelToName(f.FieldName));
+          field_names = fields.map((f) => Field.labelToName(unPctFieldName(f.FieldName)));
         }
 
         const typeByName = new Map(
